@@ -16,7 +16,7 @@
  *
  *************************************************************************
  *
- * @author Your Name <andrewid@andrew.cmu.edu>
+ * @author Yujia Wang <yujiawan@andrew.cmu.edu>
  */
 
 #include <assert.h>
@@ -427,6 +427,31 @@ static block_t *coalesce_block(block_t *block) {
      * at the malloc code in CS:APP and K&R, which make heavy use of macros
      * and which we no longer consider to be good style.
      */
+    block_t *prev_block = find_prev(block);
+    block_t *next_block = find_next(block);
+    size_t coalesce_size;
+    word_t *prev_footer = find_prev_footer(block);
+    bool prev_alloc = extract_alloc(*prev_footer);
+
+    if (prev_alloc && get_alloc(next_block)) {
+        coalesce_size = get_size(block);
+        write_block(block, coalesce_size, false);
+    }
+    if (prev_alloc && (!get_alloc(next_block))) {
+        coalesce_size = get_size(block) + get_size(next_block);
+        write_block(block, coalesce_size, false);
+    }
+    if ((!prev_alloc) && get_alloc(next_block)) {
+        coalesce_size = get_size(prev_block) + get_size(block);
+        write_block(prev_block, coalesce_size, false);
+        block = prev_block;
+    }
+    if ((!prev_alloc) && (!get_alloc(next_block))) {
+        coalesce_size =
+            get_size(prev_block) + get_size(block) + get_size(next_block);
+        write_block(prev_block, coalesce_size, false);
+        block = prev_block;
+    }
     return block;
 }
 
