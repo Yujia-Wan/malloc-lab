@@ -73,7 +73,6 @@
 #endif
 
 /* Basic constants */
-
 typedef uint64_t word_t;
 
 /** @brief Word and header size (bytes) */
@@ -124,7 +123,13 @@ typedef struct block {
      * should use a union to alias this zero-length array with another struct,
      * in order to store additional types of data in the payload memory.
      */
-    char payload[0];
+    union {
+        struct {
+            struct block *next;
+            struct block *prev;
+        };
+        char payload[0];
+    };
 
     /*
      * TODO: delete or replace this comment once you've thought about it.
@@ -135,6 +140,7 @@ typedef struct block {
 } block_t;
 
 /* Global variables */
+static block_t *list_start = NULL;
 
 /** @brief Pointer to first block in the heap */
 static block_t *heap_start = NULL;
@@ -399,6 +405,49 @@ static block_t *find_prev(block_t *block) {
 
 /******** The remaining content below are helper and debug routines ********/
 
+static void insert_free(block_t *block) {
+    if (block == NULL) {
+        return;
+    }
+    if (list_start == NULL) {
+        list_start = block;
+        block->next = NULL;
+        block->prev = NULL;
+        return;
+    }
+    block->next = list_start;
+    list_start->prev = block;
+    block->prev = NULL;
+    list_start = block;
+    return;
+}
+
+static void remove_free(block_t *block) {
+    if (block == NULL || list_start == NULL) {
+        return;
+    }
+    block_t *prev = block->prev;
+    block_t *next = block->next;
+    if (prev == NULL && next == NULL) {
+        list_start = NULL;
+        return;
+    }
+    if (prev == NULL && next != NULL) {
+        list_start = next;
+        next->prev = NULL;
+        return;
+    }
+    if (prev != NULL && next == NULL) {
+        prev->next = NULL;
+        return;
+    }
+    if (prev != NULL && next != NULL) {
+        prev->next = next;
+        next->prev = prev;
+        return;
+    }
+}
+
 /**
  * @brief
  *
@@ -429,26 +478,30 @@ static block_t *coalesce_block(block_t *block) {
      */
     block_t *prev_block = find_prev(block);
     block_t *next_block = find_next(block);
-    size_t coalesce_size;
+    size_t coalesce_size = get_size(block);
+
     word_t *prev_footer = find_prev_footer(block);
     bool prev_alloc = extract_alloc(*prev_footer);
+    bool next_alloc = get_alloc(next_block);
 
-    if (prev_alloc && get_alloc(next_block)) {
-        coalesce_size = get_size(block);
+    if (prev_alloc && next_alloc) {
         write_block(block, coalesce_size, false);
     }
-    if (prev_alloc && (!get_alloc(next_block))) {
-        coalesce_size = get_size(block) + get_size(next_block);
+    if (prev_alloc && (!next_alloc)) {
+        coalesce_size += get_size(next_block);
+        remove_free(next_block);
         write_block(block, coalesce_size, false);
     }
-    if ((!prev_alloc) && get_alloc(next_block)) {
-        coalesce_size = get_size(prev_block) + get_size(block);
+    if ((!prev_alloc) && next_alloc) {
+        coalesce_size += get_size(prev_block);
+        remove_free(prev_block);
         write_block(prev_block, coalesce_size, false);
         block = prev_block;
     }
-    if ((!prev_alloc) && (!get_alloc(next_block))) {
-        coalesce_size =
-            get_size(prev_block) + get_size(block) + get_size(next_block);
+    if ((!prev_alloc) && (!next_alloc)) {
+        coalesce_size += (get_size(prev_block) + get_size(next_block));
+        remove_free(prev_block);
+        remove_free(next_block);
         write_block(prev_block, coalesce_size, false);
         block = prev_block;
     }
@@ -519,6 +572,7 @@ static void split_block(block_t *block, size_t asize) {
 
         block_next = find_next(block);
         write_block(block_next, block_size - asize, false);
+        insert_free(block_next);
     }
 
     dbg_ensures(get_alloc(block));
@@ -536,12 +590,12 @@ static void split_block(block_t *block, size_t asize) {
  * @return
  */
 static block_t *find_fit(size_t asize) {
-    block_t *block;
+    block_t *curr;
 
-    for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
-
-        if (!(get_alloc(block)) && (asize <= get_size(block))) {
-            return block;
+    // first fit
+    for (curr = list_start; curr != NULL; curr = curr->next) {
+        if (asize <= get_size(curr)) {
+            return curr;
         }
     }
     return NULL; // no fit found
@@ -571,6 +625,57 @@ bool mm_checkheap(int line) {
      * Internal use only: If you mix guacamole on your bibimbap,
      * do you eat it with a pair of chopsticks, or with a spoon?
      */
+    word_t *prologue = (word_t *)mem_heap_lo();
+    word_t *epilogue = (word_t *)(mem_heap_hi() - 7);
+    if ((get_size((block_t *)prologue) != 0) ||
+        (!get_alloc((block_t *)prologue))) {
+        printf("prologue wrong\n");
+        return false;
+    }
+    if ((get_size((block_t *)epilogue) != 0) ||
+        (!get_alloc((block_t *)epilogue))) {
+        printf("epilogue wrong\n");
+        return false;
+    }
+
+    block_t *block;
+    for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
+        if (get_size(block) < min_block_size) {
+            printf("block size less than min block size\n");
+            return false;
+        }
+        if ((uintptr_t)header_to_payload(block) % dsize != 0) {
+            printf("wrong alignment\n");
+            return false;
+        }
+        if (block->header != *header_to_footer(block)) {
+            printf("header and footer do not match\n");
+            return false;
+        }
+        if (!get_alloc(block)) {
+            block_t *next = find_next(block);
+            if (!get_alloc(next)) {
+                printf("consecutive free blocks\n");
+                return false;
+            }
+        }
+    }
+
+    for (block = list_start; block != NULL; block = block->next) {
+        if (block == NULL) {
+            break;
+        }
+        block_t *next = block->next;
+        if (next == NULL) {
+            break;
+        }
+        if (next->prev != block) {
+            printf("next/previous pointers not consistent\n");
+            return false;
+        }
+    }
+
+    // count free blocks
 
     return true;
 }
@@ -658,7 +763,10 @@ void *malloc(size_t size) {
         if (block == NULL) {
             return bp;
         }
+        insert_free(block);
     }
+
+    remove_free(block);
 
     // The block should be marked as free
     dbg_assert(!get_alloc(block));
@@ -704,6 +812,8 @@ void free(void *bp) {
 
     // Try to coalesce the block with its neighbors
     block = coalesce_block(block);
+
+    insert_free(block);
 
     dbg_ensures(mm_checkheap(__LINE__));
 }
