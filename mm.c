@@ -569,27 +569,47 @@ static block_t *find_fit(size_t asize) {
  * @return True if no error found after checking heap; otherwise, false.
  */
 bool mm_checkheap(int line) {
+    /*
+     * TODO: Delete this comment!
+     *
+     * You will need to write the heap checker yourself.
+     * Please keep modularity in mind when you're writing the heap checker!
+     *
+     * As a filler: one guacamole is equal to 6.02214086 x 10**23 guacas.
+     * One might even call it...  the avocado's number.
+     *
+     * Internal use only: If you mix guacamole on your bibimbap,
+     * do you eat it with a pair of chopsticks, or with a spoon?
+     */
+    // check prologue and epilogue
     word_t *prologue = (word_t *)mem_heap_lo();
     word_t *epilogue = (word_t *)(mem_heap_hi() - 7);
     if ((get_size((block_t *)prologue) != 0) ||
         (!get_alloc((block_t *)prologue))) {
-        printf("prologue wrong\n");
+        printf("wrong prologue\n");
         return false;
     }
     if ((get_size((block_t *)epilogue) != 0) ||
         (!get_alloc((block_t *)epilogue))) {
-        printf("epilogue wrong\n");
+        printf("wrong epilogue\n");
         return false;
     }
 
     block_t *block;
+    // void *heap_lo = mem_heap_lo();
+    // void *heap_hi = mem_heap_hi();
     for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
-        if (get_size(block) < min_block_size) {
-            printf("block size less than min block size\n");
+        if ((size_t)header_to_payload(block) % dsize != 0) {
+            printf("wrong address alignment\n");
             return false;
         }
-        if ((uintptr_t)header_to_payload(block) % dsize != 0) {
-            printf("wrong alignment\n");
+        if (((void *)block < mem_heap_lo()) ||
+            ((void *)block > mem_heap_hi())) {
+            printf("block out of heap boundries\n");
+            return false;
+        }
+        if (get_size(block) < min_block_size) {
+            printf("block size less than min block size\n");
             return false;
         }
         if (block->header != *header_to_footer(block)) {
@@ -605,21 +625,62 @@ bool mm_checkheap(int line) {
         }
     }
 
-    // for (block = list_start; block != NULL; block = block->next) {
-    //     if (block == NULL) {
-    //         break;
-    //     }
-    //     block_t *next = block->next;
-    //     if (next == NULL) {
-    //         break;
-    //     }
-    //     if (next->prev != block) {
-    //         printf("next/previous pointers not consistent\n");
-    //         return false;
-    //     }
-    // }
+    size_t index;
+    for (index = 0; index < seglist_max; index++) {
+        size_t min_class_size = min_block_size << index;
+        size_t max_class_size = min_block_size << (index + 1);
+        for (block = seglist[index]; block != NULL; block = block->next) {
+            // check next/previous pointers are cosistent
+            block_t *next = block->next;
+            if (next == NULL) {
+                break;
+            }
+            if (next->prev != block) {
+                printf("next/previous pointers not consistent\n");
+                return false;
+            }
 
-    // count free blocks
+            // check all free pointers within heap boundries
+            if (((void *)block < mem_heap_lo()) ||
+                ((void *)block > mem_heap_hi())) {
+                printf("block out of heap boundries\n");
+                return false;
+            }
+
+            // check blocks in each list bucket fall within bucket size range
+            if ((get_size(block) < min_class_size) ||
+                ((get_size(block) >= max_class_size) &&
+                 (index != (seglist_max - 1)))) {
+                printf("block not in the right size class\n");
+                return false;
+            }
+        }
+    }
+
+    // count free blocks in heap and free list and check if they match
+    size_t free_blocks_in_heap = 0;
+    size_t free_blocks_in_list = 0;
+    for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
+        if (!get_alloc(block)) {
+            free_blocks_in_heap++;
+        }
+    }
+
+    for (index = 0; index < seglist_max; index++) {
+        for (block = seglist[index]; block != NULL; block = block->next) {
+            if (!get_alloc(block)) {
+                free_blocks_in_list++;
+            }
+        }
+    }
+
+    if (free_blocks_in_heap != free_blocks_in_list) {
+        printf(
+            "free blocks in heap and free blocks in free list do not match\n");
+        printf("free blokcks in heap : %zu, in free list : %zu\n",
+               free_blocks_in_heap, free_blocks_in_list);
+        return false;
+    }
 
     return true;
 }
@@ -643,7 +704,8 @@ bool mm_init(void) {
     heap_start = (block_t *)&(start[1]);
 
     // Extend the empty heap with a free block of chunksize bytes
-    if (extend_heap(chunksize) == NULL) {
+    block_t *block = extend_heap(chunksize);
+    if (block == NULL) {
         return false;
     }
 
@@ -651,6 +713,8 @@ bool mm_init(void) {
     for (size_t i = 0; i < seglist_max; i++) {
         seglist[i] = NULL;
     }
+
+    insert_free(block);
 
     return true;
 }
