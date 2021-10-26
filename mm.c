@@ -88,7 +88,7 @@ static const size_t min_block_size = 2 * dsize;
  * TODO: explain what chunksize is
  * (Must be divisible by dsize)
  */
-static const size_t chunksize = (1 << 12);
+static const size_t chunksize = (1 << 13);
 
 /**
  * TODO: explain what alloc_mask is
@@ -100,7 +100,7 @@ static const word_t alloc_mask = 0x1;
  */
 static const word_t size_mask = ~(word_t)0xF;
 
-static const size_t seglist_max = 16;
+static const size_t seglist_max = 10;
 
 /** @brief Represents the header and payload of one block in the heap */
 typedef struct block {
@@ -415,8 +415,10 @@ static void insert_free(block_t *block) {
     }
 
     size_t size = get_size(block);
-    for (size_t index = 0; index < seglist_max; index++) {
-        size_t class_size = min_block_size << (index + 1);
+    size_t index;
+    size_t class_size;
+    for (index = 0; index < seglist_max; index++) {
+        class_size = min_block_size << (index + 1);
         if ((size < class_size) || (index == (seglist_max - 1))) {
             if (seglist[index] == NULL) {
                 seglist[index] = block;
@@ -432,24 +434,15 @@ static void insert_free(block_t *block) {
             }
         }
     }
-
-    // if (list_start == NULL) {
-    //     list_start = block;
-    //     block->next = NULL;
-    //     block->prev = NULL;
-    //     return;
-    // }
-    // block->next = list_start;
-    // list_start->prev = block;
-    // block->prev = NULL;
-    // list_start = block;
     return;
 }
 
 static void remove_free(block_t *block) {
     size_t size = get_size(block);
-    for (size_t index = 0; index < seglist_max; index++) {
-        size_t class_size = min_block_size << (index + 1);
+    size_t index;
+    size_t class_size;
+    for (index = 0; index < seglist_max; index++) {
+        class_size = min_block_size << (index + 1);
         if ((size < class_size) || (index == (seglist_max - 1))) {
             if (block == NULL || seglist[index] == NULL) {
                 return;
@@ -476,29 +469,6 @@ static void remove_free(block_t *block) {
             }
         }
     }
-    // if (block == NULL || list_start == NULL) {
-    //     return;
-    // }
-    // block_t *prev = block->prev;
-    // block_t *next = block->next;
-    // if (prev == NULL && next == NULL) {
-    //     list_start = NULL;
-    //     return;
-    // }
-    // if (prev == NULL && next != NULL) {
-    //     list_start = next;
-    //     next->prev = NULL;
-    //     return;
-    // }
-    // if (prev != NULL && next == NULL) {
-    //     prev->next = NULL;
-    //     return;
-    // }
-    // if (prev != NULL && next != NULL) {
-    //     prev->next = next;
-    //     next->prev = prev;
-    //     return;
-    // }
 }
 
 /**
@@ -646,9 +616,9 @@ static block_t *find_fit(size_t asize) {
     // first fit
     block_t *block;
     size_t index = 0;
-
+    size_t class_size;
     while (index < seglist_max) {
-        size_t class_size = min_block_size << (index + 1);
+        class_size = min_block_size << (index + 1);
         if ((asize < class_size) || (index == (seglist_max - 1))) {
             for (block = seglist[index]; block != NULL; block = block->next) {
                 if (asize <= get_size(block)) {
@@ -659,11 +629,6 @@ static block_t *find_fit(size_t asize) {
         index++;
     }
 
-    // for (block = list_start; block != NULL; block = block->next) {
-    //     if (asize <= get_size(block)) {
-    //         return block;
-    //     }
-    // }
     return NULL; // no fit found
 }
 
