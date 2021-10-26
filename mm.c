@@ -1,10 +1,11 @@
 /**
  * @file mm.c
- * @brief A 64-bit struct-based implicit free list memory allocator
+ * @brief A 64-bit struct-based segregated free list memory allocator
  *
  * 15-213: Introduction to Computer Systems
  *
- * TODO: insert your documentation here. :)
+ * This program implements a dynamic memory allocator using segregated
+ * free list, LIFO, and first fit.
  *
  *************************************************************************
  *
@@ -85,21 +86,22 @@ static const size_t dsize = 2 * wsize;
 static const size_t min_block_size = 2 * dsize;
 
 /**
- * TODO: explain what chunksize is
+ * @brief Minimum size (bytes) when extending heap
  * (Must be divisible by dsize)
  */
 static const size_t chunksize = (1 << 13);
 
 /**
- * TODO: explain what alloc_mask is
+ * @brief Extract allocated bit in header/footer of block
  */
 static const word_t alloc_mask = 0x1;
 
 /**
- * TODO: explain what size_mask is
+ * @brief Extract block size
  */
 static const word_t size_mask = ~(word_t)0xF;
 
+/** @brief Number of seglist size classes */
 static const size_t seglist_max = 10;
 
 /** @brief Represents the header and payload of one block in the heap */
@@ -108,60 +110,27 @@ typedef struct block {
     word_t header;
 
     /**
-     * @brief A pointer to the block payload.
-     *
-     * TODO: feel free to delete this comment once you've read it carefully.
-     * We don't know what the size of the payload will be, so we will declare
-     * it as a zero-length array, which is a GCC compiler extension. This will
-     * allow us to obtain a pointer to the start of the payload.
-     *
-     * WARNING: A zero-length array must be the last element in a struct, so
-     * there should not be any struct fields after it. For this lab, we will
-     * allow you to include a zero-length array in a union, as long as the
-     * union is the last field in its containing struct. However, this is
-     * compiler-specific behavior and should be avoided in general.
-     *
-     * WARNING: DO NOT cast this pointer to/from other types! Instead, you
-     * should use a union to alias this zero-length array with another struct,
-     * in order to store additional types of data in the payload memory.
+     * @brief Union represents next and previous pointers in free blocks,
+     * and payload in allocated blocks.
      */
     union {
         struct {
+            /** @brief A pointer to next block. */
             struct block *next;
+            /** @brief A pointer to previous block. */
             struct block *prev;
         };
+        /** @brief A pointer to payload memory. */
         char payload[0];
     };
-
-    /*
-     * TODO: delete or replace this comment once you've thought about it.
-     * Why can't we declare the block footer here as part of the struct?
-     * Why do we even have footers -- will the code work fine without them?
-     * which functions actually use the data contained in footers?
-     */
 } block_t;
 
 /* Global variables */
-// static block_t *list_start = NULL;
-
+/** @brief Array of pointers to seglists of differernt size classes. */
 static block_t *seglist[seglist_max];
 
 /** @brief Pointer to first block in the heap */
 static block_t *heap_start = NULL;
-
-/*
- *****************************************************************************
- * The functions below are short wrapper functions to perform                *
- * bit manipulation, pointer arithmetic, and other helper operations.        *
- *                                                                           *
- * We've given you the function header comments for the functions below      *
- * to help you understand how this baseline code works.                      *
- *                                                                           *
- * Note that these function header comments are short since the functions    *
- * they are describing are short as well; you will need to provide           *
- * adequate details for the functions that you write yourself!               *
- *****************************************************************************
- */
 
 /*
  * ---------------------------------------------------------------------------
@@ -333,11 +302,10 @@ static void write_epilogue(block_t *block) {
  * This function writes both a header and footer, where the location of the
  * footer is computed in relation to the header.
  *
- * TODO: Are there any preconditions or postconditions?
- *
  * @param[out] block The location to begin writing the block header
  * @param[in] size The size of the new block
  * @param[in] alloc The allocation status of the new block
+ * @pre The block must be a valid block, and size should be greater than zero.
  */
 static void write_block(block_t *block, size_t size, bool alloc) {
     dbg_requires(block != NULL);
@@ -409,6 +377,10 @@ static block_t *find_prev(block_t *block) {
 
 /******** The remaining content below are helper and debug routines ********/
 
+/**
+ * @brief Insert block to segregated free list.
+ * @param[in] block A block in the heap
+ */
 static void insert_free(block_t *block) {
     if (block == NULL) {
         return;
@@ -419,6 +391,7 @@ static void insert_free(block_t *block) {
     size_t class_size;
     for (index = 0; index < seglist_max; index++) {
         class_size = min_block_size << (index + 1);
+        // find the appropriate seglist
         if ((size < class_size) || (index == (seglist_max - 1))) {
             if (seglist[index] == NULL) {
                 seglist[index] = block;
@@ -434,15 +407,19 @@ static void insert_free(block_t *block) {
             }
         }
     }
-    return;
 }
 
+/**
+ * @brief Remove block from segregated free list.
+ * @param[in] block A block in the heap
+ */
 static void remove_free(block_t *block) {
     size_t size = get_size(block);
     size_t index;
     size_t class_size;
     for (index = 0; index < seglist_max; index++) {
         class_size = min_block_size << (index + 1);
+        // find the appropriate seglist
         if ((size < class_size) || (index == (seglist_max - 1))) {
             if (block == NULL || seglist[index] == NULL) {
                 return;
@@ -472,33 +449,11 @@ static void remove_free(block_t *block) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] block
- * @return
+ * @brief Coalesce blocks if there are consecutive free blocks.
+ * @param[in] block A block in the heap
+ * @return Coalesced block if previous/next block is free.
  */
 static block_t *coalesce_block(block_t *block) {
-    /*
-     * TODO: delete or replace this comment once you're done.
-     *
-     * Before you start, it will be helpful to review the "Dynamic Memory
-     * Allocation: Basic" lecture, and especially the four coalescing
-     * cases that are described.
-     *
-     * The actual content of the function will probably involve a call to
-     * find_prev(), and multiple calls to write_block(). For examples of how
-     * to use write_block(), take a look at split_block().
-     *
-     * Please do not reference code from prior semesters for this, including
-     * old versions of the 213 website. We also discourage you from looking
-     * at the malloc code in CS:APP and K&R, which make heavy use of macros
-     * and which we no longer consider to be good style.
-     */
     block_t *prev_block = find_prev(block);
     block_t *next_block = find_next(block);
     size_t coalesce_size = get_size(block);
@@ -532,15 +487,9 @@ static block_t *coalesce_block(block_t *block) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] size
- * @return
+ * @brief Extend heap when no fit free block is found.
+ * @param[in] size size (bytes) of extension of heap
+ * @return Free block after extend heap
  */
 static block_t *extend_heap(size_t size) {
     void *bp;
@@ -550,13 +499,6 @@ static block_t *extend_heap(size_t size) {
     if ((bp = mem_sbrk(size)) == (void *)-1) {
         return NULL;
     }
-
-    /*
-     * TODO: delete or replace this comment once you've thought about it.
-     * Think about what bp represents. Why do we write the new block
-     * starting one word BEFORE bp, but with the same size that we
-     * originally requested?
-     */
 
     // Initialize free block header/footer
     block_t *block = payload_to_header(bp);
@@ -573,19 +515,15 @@ static block_t *extend_heap(size_t size) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] block
- * @param[in] asize
+ * @brief Split block if free block found is too large.
+ * @param[in] block A block in the heap
+ * @param[in] asize Size of block to be allocated
+ * @pre The block is allocated and size of block is greater than zero.
+ * @post The first block of splited blocks is allocated.
  */
 static void split_block(block_t *block, size_t asize) {
     dbg_requires(get_alloc(block));
-    /* TODO: Can you write a precondition about the value of asize? */
+    dbg_requires(asize > 0);
 
     size_t block_size = get_size(block);
 
@@ -602,15 +540,9 @@ static void split_block(block_t *block, size_t asize) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] asize
- * @return
+ * @brief Find fit free block for malloc using first fit.
+ * @param[in] asize Size of block to be allocated
+ * @return Free block found fit for malloc
  */
 static block_t *find_fit(size_t asize) {
     // first fit
@@ -628,34 +560,15 @@ static block_t *find_fit(size_t asize) {
         }
         index++;
     }
-
     return NULL; // no fit found
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] line
- * @return
+ * @brief Scans the heap and checks it for possible errors.
+ * @param[in] line Line number where this function is called
+ * @return True if no error found after checking heap; otherwise, false.
  */
 bool mm_checkheap(int line) {
-    /*
-     * TODO: Delete this comment!
-     *
-     * You will need to write the heap checker yourself.
-     * Please keep modularity in mind when you're writing the heap checker!
-     *
-     * As a filler: one guacamole is equal to 6.02214086 x 10**23 guacas.
-     * One might even call it...  the avocado's number.
-     *
-     * Internal use only: If you mix guacamole on your bibimbap,
-     * do you eat it with a pair of chopsticks, or with a spoon?
-     */
     word_t *prologue = (word_t *)mem_heap_lo();
     word_t *epilogue = (word_t *)(mem_heap_hi() - 7);
     if ((get_size((block_t *)prologue) != 0) ||
@@ -712,14 +625,8 @@ bool mm_checkheap(int line) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @return
+ * @brief Initialize heap.
+ * @return True if heap is initialized; otherwise, false.
  */
 bool mm_init(void) {
     // Create the initial empty heap
@@ -728,12 +635,6 @@ bool mm_init(void) {
     if (start == (void *)-1) {
         return false;
     }
-
-    /*
-     * TODO: delete or replace this comment once you've thought about it.
-     * Think about why we need a heap prologue and epilogue. Why do
-     * they correspond to a block footer and header respectively?
-     */
 
     start[0] = pack(0, true); // Heap prologue (block footer)
     start[1] = pack(0, true); // Heap epilogue (block header)
@@ -755,15 +656,9 @@ bool mm_init(void) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] size
- * @return
+ * @brief Allocate a block with payload of at least size bytes.
+ * @param[in] size Size (bytes) of payload
+ * @return A pointer to an allocated block payload of at least size bytes
  */
 void *malloc(size_t size) {
     dbg_requires(mm_checkheap(__LINE__));
@@ -821,14 +716,8 @@ void *malloc(size_t size) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] bp
+ * @brief Free the block pointed to by bp.
+ * @param[in] bp A pointer to the block to be freed
  */
 void free(void *bp) {
     dbg_requires(mm_checkheap(__LINE__));
@@ -855,16 +744,11 @@ void free(void *bp) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] ptr
- * @param[in] size
- * @return
+ * @brief Free the block pointed to by ptr followed by malloc a block
+ * with payload of at least size bytes.
+ * @param[in] ptr A pointer to block to be freed
+ * @param[in] size Size (bytes) of payload
+ * @return A pointer to an allocated region of at least size bytes.
  */
 void *realloc(void *ptr, size_t size) {
     block_t *block = payload_to_header(ptr);
@@ -904,16 +788,10 @@ void *realloc(void *ptr, size_t size) {
 }
 
 /**
- * @brief
- *
- * <What does this function do?>
- * <What are the function's arguments?>
- * <What is the function's return value?>
- * <Are there any preconditions or postconditions?>
- *
- * @param[in] elements
- * @param[in] size
- * @return
+ * @brief Allocates memory for an array of elements of size bytes each.
+ * @param[in] elements Number of elements of array
+ * @param[in] size Size (bytes) of each element of array
+ * @return A pointer to the allocated memory
  */
 void *calloc(size_t elements, size_t size) {
     void *bp;
