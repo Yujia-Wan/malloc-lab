@@ -100,6 +100,8 @@ static const word_t alloc_mask = 0x1;
  */
 static const word_t size_mask = ~(word_t)0xF;
 
+static const size_t seglist_max = 16;
+
 /** @brief Represents the header and payload of one block in the heap */
 typedef struct block {
     /** @brief Header contains size + allocation flag */
@@ -140,7 +142,9 @@ typedef struct block {
 } block_t;
 
 /* Global variables */
-static block_t *list_start = NULL;
+// static block_t *list_start = NULL;
+
+static block_t *seglist[seglist_max];
 
 /** @brief Pointer to first block in the heap */
 static block_t *heap_start = NULL;
@@ -409,43 +413,92 @@ static void insert_free(block_t *block) {
     if (block == NULL) {
         return;
     }
-    if (list_start == NULL) {
-        list_start = block;
-        block->next = NULL;
-        block->prev = NULL;
-        return;
+
+    size_t size = get_size(block);
+    for (size_t index = 0; index < seglist_max; index++) {
+        size_t class_size = min_block_size << (index + 1);
+        if ((size < class_size) || (index == (seglist_max - 1))) {
+            if (seglist[index] == NULL) {
+                seglist[index] = block;
+                block->next = NULL;
+                block->prev = NULL;
+                return;
+            } else {
+                block->next = seglist[index];
+                seglist[index]->prev = block;
+                block->prev = NULL;
+                seglist[index] = block;
+                return;
+            }
+        }
     }
-    block->next = list_start;
-    list_start->prev = block;
-    block->prev = NULL;
-    list_start = block;
+
+    // if (list_start == NULL) {
+    //     list_start = block;
+    //     block->next = NULL;
+    //     block->prev = NULL;
+    //     return;
+    // }
+    // block->next = list_start;
+    // list_start->prev = block;
+    // block->prev = NULL;
+    // list_start = block;
     return;
 }
 
 static void remove_free(block_t *block) {
-    if (block == NULL || list_start == NULL) {
-        return;
+    size_t size = get_size(block);
+    for (size_t index = 0; index < seglist_max; index++) {
+        size_t class_size = min_block_size << (index + 1);
+        if ((size < class_size) || (index == (seglist_max - 1))) {
+            if (block == NULL || seglist[index] == NULL) {
+                return;
+            }
+            block_t *prev = block->prev;
+            block_t *next = block->next;
+            if (prev == NULL && next == NULL) {
+                seglist[index] = NULL;
+                return;
+            }
+            if (prev == NULL && next != NULL) {
+                seglist[index] = next;
+                next->prev = NULL;
+                return;
+            }
+            if (prev != NULL && next == NULL) {
+                prev->next = NULL;
+                return;
+            }
+            if (prev != NULL && next != NULL) {
+                prev->next = next;
+                next->prev = prev;
+                return;
+            }
+        }
     }
-    block_t *prev = block->prev;
-    block_t *next = block->next;
-    if (prev == NULL && next == NULL) {
-        list_start = NULL;
-        return;
-    }
-    if (prev == NULL && next != NULL) {
-        list_start = next;
-        next->prev = NULL;
-        return;
-    }
-    if (prev != NULL && next == NULL) {
-        prev->next = NULL;
-        return;
-    }
-    if (prev != NULL && next != NULL) {
-        prev->next = next;
-        next->prev = prev;
-        return;
-    }
+    // if (block == NULL || list_start == NULL) {
+    //     return;
+    // }
+    // block_t *prev = block->prev;
+    // block_t *next = block->next;
+    // if (prev == NULL && next == NULL) {
+    //     list_start = NULL;
+    //     return;
+    // }
+    // if (prev == NULL && next != NULL) {
+    //     list_start = next;
+    //     next->prev = NULL;
+    //     return;
+    // }
+    // if (prev != NULL && next == NULL) {
+    //     prev->next = NULL;
+    //     return;
+    // }
+    // if (prev != NULL && next != NULL) {
+    //     prev->next = next;
+    //     next->prev = prev;
+    //     return;
+    // }
 }
 
 /**
@@ -590,14 +643,27 @@ static void split_block(block_t *block, size_t asize) {
  * @return
  */
 static block_t *find_fit(size_t asize) {
-    block_t *curr;
-
     // first fit
-    for (curr = list_start; curr != NULL; curr = curr->next) {
-        if (asize <= get_size(curr)) {
-            return curr;
+    block_t *block;
+    size_t index = 0;
+
+    while (index < seglist_max) {
+        size_t class_size = min_block_size << (index + 1);
+        if ((asize < class_size) || (index == (seglist_max - 1))) {
+            for (block = seglist[index]; block != NULL; block = block->next) {
+                if (asize <= get_size(block)) {
+                    return block;
+                }
+            }
         }
+        index++;
     }
+
+    // for (block = list_start; block != NULL; block = block->next) {
+    //     if (asize <= get_size(block)) {
+    //         return block;
+    //     }
+    // }
     return NULL; // no fit found
 }
 
@@ -661,19 +727,19 @@ bool mm_checkheap(int line) {
         }
     }
 
-    for (block = list_start; block != NULL; block = block->next) {
-        if (block == NULL) {
-            break;
-        }
-        block_t *next = block->next;
-        if (next == NULL) {
-            break;
-        }
-        if (next->prev != block) {
-            printf("next/previous pointers not consistent\n");
-            return false;
-        }
-    }
+    // for (block = list_start; block != NULL; block = block->next) {
+    //     if (block == NULL) {
+    //         break;
+    //     }
+    //     block_t *next = block->next;
+    //     if (next == NULL) {
+    //         break;
+    //     }
+    //     if (next->prev != block) {
+    //         printf("next/previous pointers not consistent\n");
+    //         return false;
+    //     }
+    // }
 
     // count free blocks
 
@@ -713,6 +779,11 @@ bool mm_init(void) {
     // Extend the empty heap with a free block of chunksize bytes
     if (extend_heap(chunksize) == NULL) {
         return false;
+    }
+
+    // Initialize segregated list
+    for (size_t i = 0; i < seglist_max; i++) {
+        seglist[i] = NULL;
     }
 
     return true;
