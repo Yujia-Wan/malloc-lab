@@ -3,6 +3,7 @@
 ._*
 *.dSYM
 *.swp
+*.txt
 
 # Compilation files
 /objs/

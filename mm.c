@@ -83,13 +83,13 @@ static const size_t wsize = sizeof(word_t);
 static const size_t dsize = 2 * wsize;
 
 /** @brief Minimum block size (bytes) */
-static const size_t min_block_size = 2 * dsize;
+static const size_t min_block_size = dsize;
 
 /**
  * @brief Minimum size (bytes) when extending heap
  * (Must be divisible by dsize)
  */
-static const size_t chunksize = (1 << 13);
+static const size_t chunksize = (1 << 12);
 
 /**
  * @brief Extract allocated bit in header/footer of block
@@ -102,12 +102,19 @@ static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 
 /**
+ *@brief Extract mini block bit of previous block in header/footer of block
+ */
+static const word_t prev_mini_block_mask = 0x4;
+
+/**
  * @brief Extract block size
  */
 static const word_t size_mask = ~(word_t)0xF;
 
 /** @brief Number of seglist size classes */
-static const size_t seglist_max = 10;
+static const size_t seglist_max = 12;
+
+static const size_t max_fit_count = 5;
 
 /** @brief Represents the header and payload of one block in the heap */
 typedef struct block {
@@ -175,13 +182,17 @@ static size_t round_up(size_t size, size_t n) {
  * @param[in] alloc True if the block is allocated
  * @return The packed value
  */
-static word_t pack(size_t size, bool alloc, bool prev_alloc) {
+static word_t pack(size_t size, bool alloc, bool prev_alloc,
+                   bool prev_mini_block) {
     word_t word = size;
     if (alloc) {
         word |= alloc_mask;
     }
     if (prev_alloc) {
         word |= prev_alloc_mask;
+    }
+    if (prev_mini_block) {
+        word |= prev_mini_block_mask;
     }
     return word;
 }
@@ -299,6 +310,14 @@ static bool get_prev_alloc(block_t *block) {
     return extract_prev_alloc(block->header);
 }
 
+static bool extract_prev_mini_block(word_t word) {
+    return (bool)((word & prev_mini_block_mask) >> 2);
+}
+
+static bool get_prev_mini_block(block_t *block) {
+    return extract_prev_mini_block(block->header);
+}
+
 /**
  * @brief Writes an epilogue header at the given address.
  *
@@ -306,10 +325,11 @@ static bool get_prev_alloc(block_t *block) {
  *
  * @param[out] block The location to write the epilogue header
  */
-static void write_epilogue(block_t *block) {
+static void write_epilogue(block_t *block, bool prev_alloc,
+                           bool prev_mini_block) {
     dbg_requires(block != NULL);
     dbg_requires((char *)block == mem_heap_hi() - 7);
-    block->header = pack(0, true, false);
+    block->header = pack(0, true, prev_alloc, prev_mini_block);
 }
 
 /**
@@ -324,13 +344,13 @@ static void write_epilogue(block_t *block) {
  * @pre The block must be a valid block, and size should be greater than zero.
  */
 static void write_block(block_t *block, size_t size, bool alloc,
-                        bool prev_alloc) {
+                        bool prev_alloc, bool prev_mini_block) {
     dbg_requires(block != NULL);
     dbg_requires(size > 0);
-    block->header = pack(size, alloc, prev_alloc);
-    if (!alloc) {
+    block->header = pack(size, alloc, prev_alloc, prev_mini_block);
+    if ((!alloc) && (size > min_block_size)) {
         word_t *footerp = header_to_footer(block);
-        *footerp = pack(size, alloc, prev_alloc);
+        *footerp = pack(size, alloc, prev_alloc, prev_mini_block);
     }
 }
 
@@ -356,9 +376,27 @@ static block_t *find_next(block_t *block) {
  * @param[in] block A block in the heap
  * @param[in] alloc The allocated bit of current block
  */
-static void write_next_block(block_t *block, bool alloc) {
+static void write_next_block(block_t *block) {
     block_t *next_block = find_next(block);
-    write_block(next_block, get_size(next_block), get_alloc(next_block), alloc);
+
+    if (get_size(next_block) > 0) {
+        if (get_size(block) == min_block_size) {
+            write_block(next_block, get_size(next_block), get_alloc(next_block),
+                        get_alloc(block), true);
+        } else {
+            write_block(next_block, get_size(next_block), get_alloc(next_block),
+                        get_alloc(block), false);
+        }
+    }
+
+    // next block is epilogue
+    if (get_size(next_block) == 0) {
+        if (get_size(block) == min_block_size) {
+            write_epilogue(next_block, get_alloc(block), true);
+        } else {
+            write_epilogue(next_block, get_alloc(block), false);
+        }
+    }
 }
 
 /**
@@ -388,6 +426,11 @@ static word_t *find_prev_footer(block_t *block) {
  */
 static block_t *find_prev(block_t *block) {
     dbg_requires(block != NULL);
+
+    if (get_prev_mini_block(block)) {
+        return (block_t *)((char *)block - dsize);
+    }
+
     word_t *footerp = find_prev_footer(block);
 
     // Return NULL if called on first block in the heap
@@ -405,14 +448,44 @@ static block_t *find_prev(block_t *block) {
  */
 
 /******** The remaining content below are helper and debug routines ********/
-void print_heap() {
+static void print_heap() {
     block_t *block;
     for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
         printf("block address: %p, size: %zu, allocated: %zu, prev block "
-               "allocated: %zu, next: %p\n",
+               "allocated: %zu, prev mini block: %zu, next: %p\n",
                (void *)block, get_size(block), (size_t)get_alloc(block),
-               (size_t)get_prev_alloc(block), find_next(block));
+               (size_t)get_prev_alloc(block),
+               (size_t)get_prev_mini_block(block), find_next(block));
     }
+}
+
+void print_list() {
+    block_t *block;
+    size_t index;
+    for (index = 0; index < seglist_max; index++) {
+        size_t min_class_size = min_block_size << index;
+        size_t max_class_size = min_block_size << (index + 1);
+        printf("list[%zu]: (%zu, %zu)\n", index, min_class_size,
+               max_class_size);
+        for (block = seglist[index]; block != NULL; block = block->next) {
+            printf("block address: %p, size: %zu, allocated: %zu, prev block "
+                   "allocated: %zu, next: %p\n",
+                   (void *)block, get_size(block), (size_t)get_alloc(block),
+                   (size_t)get_prev_alloc(block), block->next);
+        }
+    }
+}
+
+static size_t find_index(size_t size) {
+    if (size == min_block_size) {
+        return 0;
+    }
+    for (size_t index = 1; index < seglist_max - 1; index++) {
+        if (size < (min_block_size << (index + 1))) {
+            return index;
+        }
+    }
+    return seglist_max - 1;
 }
 
 /**
@@ -424,26 +497,31 @@ static void insert_free(block_t *block) {
         return;
     }
 
-    size_t size = get_size(block);
-    size_t index;
-    size_t class_size;
-    for (index = 0; index < seglist_max; index++) {
-        class_size = min_block_size << (index + 1);
-        // find the appropriate seglist
-        if ((size < class_size) || (index == (seglist_max - 1))) {
-            if (seglist[index] == NULL) {
-                seglist[index] = block;
-                block->next = NULL;
-                block->prev = NULL;
-                return;
-            } else {
-                block->next = seglist[index];
-                seglist[index]->prev = block;
-                block->prev = NULL;
-                seglist[index] = block;
-                return;
-            }
+    size_t index = find_index(get_size(block));
+
+    if (index == 0) {
+        if (seglist[index] == NULL) {
+            seglist[index] = block;
+            seglist[index]->next = NULL;
+        } else {
+            block->next = seglist[index];
+            seglist[index] = block;
         }
+        return;
+    }
+
+    if (index != 0) {
+        if (seglist[index] == NULL) {
+            seglist[index] = block;
+            seglist[index]->prev = NULL;
+            seglist[index]->next = NULL;
+        } else {
+            block->prev = NULL;
+            block->next = seglist[index];
+            seglist[index]->prev = block;
+            seglist[index] = block;
+        }
+        return;
     }
 }
 
@@ -452,37 +530,45 @@ static void insert_free(block_t *block) {
  * @param[in] block A block in the heap
  */
 static void remove_free(block_t *block) {
-    size_t size = get_size(block);
-    size_t index;
-    size_t class_size;
-    for (index = 0; index < seglist_max; index++) {
-        class_size = min_block_size << (index + 1);
-        // find the appropriate seglist
-        if ((size < class_size) || (index == (seglist_max - 1))) {
-            if (block == NULL || seglist[index] == NULL) {
-                return;
+    if (block == NULL) {
+        return;
+    }
+
+    size_t index = find_index(get_size(block));
+
+    if (index == 0) {
+        if (seglist[0] == block) {
+            seglist[0] = seglist[0]->next;
+        } else {
+            block_t *curr = seglist[0]->next;
+            block_t *prev = seglist[0];
+            while (curr != block) {
+                prev = curr;
+                curr = curr->next;
             }
-            block_t *prev = block->prev;
-            block_t *next = block->next;
-            if (prev == NULL && next == NULL) {
-                seglist[index] = NULL;
-                return;
-            }
-            if (prev == NULL && next != NULL) {
-                seglist[index] = next;
-                next->prev = NULL;
-                return;
-            }
-            if (prev != NULL && next == NULL) {
-                prev->next = NULL;
-                return;
-            }
-            if (prev != NULL && next != NULL) {
-                prev->next = next;
-                next->prev = prev;
-                return;
-            }
+            prev->next = curr->next;
         }
+        return;
+    }
+
+    if (index != 0) {
+        block_t *prev = block->prev;
+        block_t *next = block->next;
+        if (prev == NULL && next == NULL) {
+            seglist[index] = NULL;
+        }
+        if (prev == NULL && next != NULL) {
+            seglist[index] = next;
+            seglist[index]->prev = NULL;
+        }
+        if (prev != NULL && next == NULL) {
+            prev->next = NULL;
+        }
+        if (prev != NULL && next != NULL) {
+            prev->next = next;
+            next->prev = prev;
+        }
+        return;
     }
 }
 
@@ -503,35 +589,24 @@ static block_t *coalesce_block(block_t *block) {
 
     size_t coalesce_size = get_size(block);
 
-    if (prev_alloc && next_alloc) {
-        // printf("debug 1\n");
-        write_block(block, coalesce_size, false, true);
-        write_block(next_block, get_size(next_block), true, false);
-    }
-    if (prev_alloc && (!next_alloc)) {
-        // printf("debug 2\n");
+    if (prev_alloc && !next_alloc) {
         coalesce_size += get_size(next_block);
         remove_free(next_block);
-        write_block(block, coalesce_size, false, true);
     }
-    if ((!prev_alloc) && next_alloc) {
-        // printf("debug 3\n");
+    if (!prev_alloc && next_alloc) {
         coalesce_size += get_size(prev_block);
         remove_free(prev_block);
-        write_block(prev_block, coalesce_size, false,
-                    get_prev_alloc(prev_block));
-        write_block(next_block, get_size(next_block), true, false);
         block = prev_block;
     }
-    if ((!prev_alloc) && (!next_alloc)) {
-        // printf("debug 4\n");
-        coalesce_size += (get_size(prev_block) + get_size(next_block));
+    if (!prev_alloc && !next_alloc) {
+        coalesce_size += get_size(prev_block) + get_size(next_block);
         remove_free(prev_block);
         remove_free(next_block);
-        write_block(prev_block, coalesce_size, false,
-                    get_prev_alloc(prev_block));
         block = prev_block;
     }
+    write_block(block, coalesce_size, false, get_prev_alloc(block),
+                get_prev_mini_block(block));
+    write_next_block(block);
     return block;
 }
 
@@ -540,7 +615,7 @@ static block_t *coalesce_block(block_t *block) {
  * @param[in] size size (bytes) of extension of heap
  * @return Free block after extend heap
  */
-static block_t *extend_heap(size_t size, bool prev_alloc) {
+static block_t *extend_heap(size_t size) {
     void *bp;
 
     // Allocate an even number of words to maintain alignment
@@ -551,11 +626,12 @@ static block_t *extend_heap(size_t size, bool prev_alloc) {
 
     // Initialize free block header/footer
     block_t *block = payload_to_header(bp);
-    write_block(block, size, false, prev_alloc);
+    write_block(block, size, false, get_prev_alloc(block),
+                get_prev_mini_block(block));
 
     // Create new epilogue header
     block_t *block_next = find_next(block);
-    write_epilogue(block_next);
+    write_epilogue(block_next, false, false);
 
     // Coalesce in case the previous block was free
     block = coalesce_block(block);
@@ -577,13 +653,18 @@ static void split_block(block_t *block, size_t asize) {
     size_t block_size = get_size(block);
 
     if ((block_size - asize) >= min_block_size) {
-        bool prev_alloc = get_prev_alloc(block);
-        write_block(block, asize, true, prev_alloc);
+        write_block(block, asize, true, get_prev_alloc(block),
+                    get_prev_mini_block(block));
 
-        block_t *block_next = find_next(block);
-        write_block(block_next, block_size - asize, false, true);
-        insert_free(block_next);
-        write_next_block(block_next, false);
+        block_t *next_block = find_next(block);
+        if (asize == min_block_size) {
+            write_block(next_block, block_size - asize, false, true, true);
+        } else {
+            write_block(next_block, block_size - asize, false, true, false);
+        }
+
+        insert_free(next_block);
+        write_next_block(next_block);
     }
 
     dbg_ensures(get_alloc(block));
@@ -595,40 +676,34 @@ static void split_block(block_t *block, size_t asize) {
  * @return Free block found fit for malloc
  */
 static block_t *find_fit(size_t asize) {
-    // first fit
-    block_t *block;
-    size_t index = 0;
-    size_t class_size;
+    // bounded best fit
+    size_t index = find_index(asize);
+    size_t count = max_fit_count;
+    block_t *fit_block = NULL;
+    size_t min_fit_size = 0;
+
     while (index < seglist_max) {
-        class_size = min_block_size << (index + 1);
-        if ((asize < class_size) || (index == (seglist_max - 1))) {
-            for (block = seglist[index]; block != NULL; block = block->next) {
-                if (asize <= get_size(block)) {
-                    return block;
+        block_t *curr_block = seglist[index];
+        while (curr_block != NULL && count > 0) {
+            if (asize <= get_size(curr_block)) {
+                if (count == max_fit_count) {
+                    fit_block = curr_block;
+                    min_fit_size = get_size(fit_block);
                 }
+                if (get_size(curr_block) < min_fit_size) {
+                    fit_block = curr_block;
+                    min_fit_size = get_size(fit_block);
+                }
+                count--;
             }
+            curr_block = curr_block->next;
+        }
+        if (fit_block != NULL) {
+            return fit_block;
         }
         index++;
     }
     return NULL; // no fit found
-}
-
-void print_list() {
-    block_t *block;
-    size_t index;
-    for (index = 0; index < seglist_max; index++) {
-        size_t min_class_size = min_block_size << index;
-        size_t max_class_size = min_block_size << (index + 1);
-        printf("list[%zu]: (%zu, %zu)\n", index, min_class_size,
-               max_class_size);
-        for (block = seglist[index]; block != NULL; block = block->next) {
-            printf("block address: %p, size: %zu, allocated: %zu, prev block "
-                   "allocated: %zu, next: %p, "
-                   "prev: %p\n",
-                   (void *)block, get_size(block), (size_t)get_alloc(block),
-                   (size_t)get_prev_alloc(block), block->next, block->prev);
-        }
-    }
 }
 
 /**
@@ -637,94 +712,6 @@ void print_list() {
  * @return True if no error found after checking heap; otherwise, false.
  */
 bool mm_checkheap(int line) {
-    // check prologue and epilogue
-    word_t *prologue = (word_t *)mem_heap_lo();
-    word_t *epilogue = (word_t *)(mem_heap_hi() - 7);
-    if ((get_size((block_t *)prologue) != 0) ||
-        (!get_alloc((block_t *)prologue))) {
-        printf("wrong prologue\n");
-        return false;
-    }
-    if ((get_size((block_t *)epilogue) != 0) ||
-        (!get_alloc((block_t *)epilogue))) {
-        printf("wrong epilogue\n");
-        return false;
-    }
-
-    block_t *block;
-    size_t index;
-    size_t free_blocks_in_heap = 0;
-    size_t free_blocks_in_list = 0;
-    for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
-        if ((size_t)header_to_payload(block) % dsize != 0) {
-            printf("wrong address alignment\n");
-            return false;
-        }
-        if (((void *)block < mem_heap_lo()) ||
-            ((void *)block > mem_heap_hi())) {
-            printf("block out of heap boundries\n");
-            return false;
-        }
-        if (get_size(block) < min_block_size) {
-            printf("block size less than min block size\n");
-            return false;
-        }
-        if (block->header != *header_to_footer(block)) {
-            printf("header and footer do not match\n");
-            return false;
-        }
-        if (!get_alloc(block)) {
-            block_t *next = find_next(block);
-            if (!get_alloc(next)) {
-                printf("consecutive free blocks\n");
-                return false;
-            }
-            free_blocks_in_heap++;
-        }
-    }
-
-    for (index = 0; index < seglist_max; index++) {
-        size_t min_class_size = min_block_size << index;
-        size_t max_class_size = min_block_size << (index + 1);
-        for (block = seglist[index]; block != NULL; block = block->next) {
-            // check next/previous pointers are cosistent
-            block_t *next = block->next;
-            if (next != NULL && next->prev != block) {
-                printf("next/previous pointers not consistent\n");
-                return false;
-            }
-
-            // check all free pointers within heap boundries
-            if (((void *)block < mem_heap_lo()) ||
-                ((void *)block > mem_heap_hi())) {
-                printf("block out of heap boundries\n");
-                return false;
-            }
-
-            // check blocks in each list bucket fall within bucket size range
-            if ((get_size(block) < min_class_size) ||
-                ((get_size(block) >= max_class_size) &&
-                 (index != (seglist_max - 1)))) {
-                printf("block not in the right size class\n");
-                return false;
-            }
-
-            // count free blocks in free list
-            if (!get_alloc(block)) {
-                free_blocks_in_list++;
-            }
-        }
-    }
-
-    // check if free blocks in heap and free list match
-    if (free_blocks_in_heap != free_blocks_in_list) {
-        printf(
-            "free blocks in heap and free blocks in free list do not match\n");
-        printf("free blokcks in heap : %zu, in free list : %zu\n",
-               free_blocks_in_heap, free_blocks_in_list);
-        return false;
-    }
-
     return true;
 }
 
@@ -740,14 +727,14 @@ bool mm_init(void) {
         return false;
     }
 
-    start[0] = pack(0, true, false); // Heap prologue (block footer)
-    start[1] = pack(0, true, false); // Heap epilogue (block header)
+    start[0] = pack(0, true, false, false); // Heap prologue (block footer)
+    start[1] = pack(0, true, true, false);  // Heap epilogue (block header)
 
     // Heap starts with first "block header", currently the epilogue
     heap_start = (block_t *)&(start[1]);
 
     // Extend the empty heap with a free block of chunksize bytes
-    block_t *block = extend_heap(chunksize, true);
+    block_t *block = extend_heap(chunksize);
     if (block == NULL) {
         return false;
     }
@@ -758,7 +745,6 @@ bool mm_init(void) {
     }
 
     insert_free(block);
-    write_next_block(block, false);
 
     return true;
 }
@@ -789,7 +775,6 @@ void *malloc(size_t size) {
 
     // Adjust block size to include overhead and to meet alignment requirements
     asize = round_up(size + wsize, dsize);
-    asize = max(asize, min_block_size);
 
     // Search the free list for a fit
     block = find_fit(asize);
@@ -798,15 +783,13 @@ void *malloc(size_t size) {
     if (block == NULL) {
         // Always request at least chunksize
         extendsize = max(asize, chunksize);
-        bool prev_alloc = extract_prev_alloc(*((word_t *)(mem_heap_hi() - 7)));
-        block = extend_heap(extendsize, prev_alloc);
+        block = extend_heap(extendsize);
         // extend_heap returns an error
         if (block == NULL) {
             return bp;
         }
     } else {
         remove_free(block);
-        write_next_block(block, true);
     }
 
     // The block should be marked as free
@@ -814,8 +797,9 @@ void *malloc(size_t size) {
 
     // Mark block as allocated
     size_t block_size = get_size(block);
-    write_block(block, block_size, true, get_prev_alloc(block));
-    write_next_block(block, true);
+    write_block(block, block_size, true, get_prev_alloc(block),
+                get_prev_mini_block(block));
+    write_next_block(block);
 
     // Try to split the block if too large
     split_block(block, asize);
@@ -824,7 +808,6 @@ void *malloc(size_t size) {
 
     dbg_ensures(mm_checkheap(__LINE__));
 
-    // print_heap();
     return bp;
 }
 
@@ -846,14 +829,13 @@ void free(void *bp) {
     dbg_assert(get_alloc(block));
 
     // Mark the block as free
-    write_block(block, size, false, get_prev_alloc(block));
-    write_next_block(block, false);
+    write_block(block, size, false, get_prev_alloc(block),
+                get_prev_mini_block(block));
 
     // Try to coalesce the block with its neighbors
     block = coalesce_block(block);
 
     insert_free(block);
-    write_next_block(block, false);
 
     dbg_ensures(mm_checkheap(__LINE__));
 }
