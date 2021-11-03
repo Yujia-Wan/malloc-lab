@@ -4,18 +4,12 @@
  *
  * 15-213: Introduction to Computer Systems
  *
- * This program implements a dynamic memory allocator using segregated
- * free list, LIFO, and first fit.
- *
- *************************************************************************
- *
- * ADVICE FOR STUDENTS.
- * - Step 0: Please read the writeup!
- * - Step 1: Write your heap checker.
- * - Step 2: Write contracts / debugging assert statements.
- * - Good luck, and have fun!
- *
- *************************************************************************
+ * This program implements a dynamic memory allocator with segregated free list,
+ * LIFO, bounded best fit policy and mini block. Mini block's size is 16 bytes,
+ * with 8 bytes of header, 8 bytes of payload for allocated blocks or 8 bytes of
+ * next pointer for free blocks. For other blocks, if allocated, block has
+ * header and payload; if free, block has header, next pointer, previous pointer
+ * and footer.
  *
  * @author Yujia Wang <yujiawan@andrew.cmu.edu>
  */
@@ -32,8 +26,6 @@
 #include "memlib.h"
 #include "mm.h"
 
-/* Do not change the following! */
-
 #ifdef DRIVER
 /* create aliases for driver tests */
 #define malloc mm_malloc
@@ -43,8 +35,6 @@
 #define memset mem_memset
 #define memcpy mem_memcpy
 #endif /* def DRIVER */
-
-/* You can change anything from here onward */
 
 /*
  *****************************************************************************
@@ -114,7 +104,8 @@ static const word_t size_mask = ~(word_t)0xF;
 /** @brief Number of seglist size classes */
 static const size_t seglist_max = 12;
 
-static const size_t max_fit_count = 5;
+/** @brief Maximun number of times finding fit block */
+static const size_t max_fit_count = 10;
 
 /** @brief Represents the header and payload of one block in the heap */
 typedef struct block {
@@ -180,6 +171,8 @@ static size_t round_up(size_t size, size_t n) {
  *
  * @param[in] size The size of the block being represented
  * @param[in] alloc True if the block is allocated
+ * @param[in] prev_alloc True if previous block is allocated
+ * @param[in] prev_mini_block True if previous block is mini block
  * @return The packed value
  */
 static word_t pack(size_t size, bool alloc, bool prev_alloc,
@@ -302,18 +295,48 @@ static bool get_alloc(block_t *block) {
     return extract_alloc(block->header);
 }
 
+/**
+ * @brief Returns the allocation status of previous block of a given header
+ * value.
+ *
+ * This is based on the second lowest bit of the header value.
+ *
+ * @param[in] word
+ * @return The allocation status of previous block correpsonding to the word
+ */
 static bool extract_prev_alloc(word_t word) {
     return (bool)((word & prev_alloc_mask) >> 1);
 }
 
+/**
+ * @brief Returns the allocation status of previous block, based on current
+ * block's header.
+ * @param[in] block
+ * @return The allocation status of the previous block
+ */
 static bool get_prev_alloc(block_t *block) {
     return extract_prev_alloc(block->header);
 }
 
+/**
+ * @brief Returns whether previous block is mini block, given current block's
+ * header value.
+ *
+ * This is based on the third lowest bit of the header value.
+ *
+ * @param[in] word
+ * @return True if previous block is mini block correpsonding to the word
+ */
 static bool extract_prev_mini_block(word_t word) {
     return (bool)((word & prev_mini_block_mask) >> 2);
 }
 
+/**
+ * @brief Returns whether previous block is mini block, based on current block's
+ * header.
+ * @param[in] block
+ * @return True if previous block is mini block
+ */
 static bool get_prev_mini_block(block_t *block) {
     return extract_prev_mini_block(block->header);
 }
@@ -324,6 +347,8 @@ static bool get_prev_mini_block(block_t *block) {
  * The epilogue header has size 0, and is marked as allocated.
  *
  * @param[out] block The location to write the epilogue header
+ * @param[in] prev_alloc The allocation status of previous block
+ * @param[in] prev_mini_block Tells whether previous block is mini block
  */
 static void write_epilogue(block_t *block, bool prev_alloc,
                            bool prev_mini_block) {
@@ -341,6 +366,9 @@ static void write_epilogue(block_t *block, bool prev_alloc,
  * @param[out] block The location to begin writing the block header
  * @param[in] size The size of the new block
  * @param[in] alloc The allocation status of the new block
+ * @param[in] prev_alloc The allocation status of previous block of new block
+ * @param[in] prev_mini_block Tells whether previous block of new block is mini
+ * block
  * @pre The block must be a valid block, and size should be greater than zero.
  */
 static void write_block(block_t *block, size_t size, bool alloc,
@@ -374,7 +402,7 @@ static block_t *find_next(block_t *block) {
 /**
  * @brief Writes next block of the block starting at given address
  * @param[in] block A block in the heap
- * @param[in] alloc The allocated bit of current block
+ * @param[in] alloc The allocation status of the block
  */
 static void write_next_block(block_t *block) {
     block_t *next_block = find_next(block);
@@ -448,18 +476,24 @@ static block_t *find_prev(block_t *block) {
  */
 
 /******** The remaining content below are helper and debug routines ********/
+/**
+ * @brief Helper function to print heap
+ */
 static void print_heap() {
     block_t *block;
     for (block = heap_start; get_size(block) > 0; block = find_next(block)) {
         printf("block address: %p, size: %zu, allocated: %zu, prev block "
                "allocated: %zu, prev mini block: %zu, next: %p\n",
-               (void *)block, get_size(block), (size_t)get_alloc(block),
+               block, get_size(block), (size_t)get_alloc(block),
                (size_t)get_prev_alloc(block),
                (size_t)get_prev_mini_block(block), find_next(block));
     }
 }
 
-void print_list() {
+/**
+ * @brief Helper function to print segregated free list
+ */
+static void print_list() {
     block_t *block;
     size_t index;
     for (index = 0; index < seglist_max; index++) {
@@ -470,12 +504,17 @@ void print_list() {
         for (block = seglist[index]; block != NULL; block = block->next) {
             printf("block address: %p, size: %zu, allocated: %zu, prev block "
                    "allocated: %zu, next: %p\n",
-                   (void *)block, get_size(block), (size_t)get_alloc(block),
+                   block, get_size(block), (size_t)get_alloc(block),
                    (size_t)get_prev_alloc(block), block->next);
         }
     }
 }
 
+/**
+ * @brief Finds seglist index of given size of block
+ * @param[in] size Size of block
+ * @return Index of seglist
+ */
 static size_t find_index(size_t size) {
     if (size == min_block_size) {
         return 0;
@@ -662,9 +701,9 @@ static void split_block(block_t *block, size_t asize) {
         } else {
             write_block(next_block, block_size - asize, false, true, false);
         }
+        write_next_block(next_block);
 
         insert_free(next_block);
-        write_next_block(next_block);
     }
 
     dbg_ensures(get_alloc(block));
