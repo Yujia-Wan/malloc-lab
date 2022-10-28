@@ -1,9 +1,8 @@
 # Malloc-Lab
 
-#############################
-# CS:APP Malloc Lab
-# Handout files for students
-#############################
+## CS:APP Malloc Lab
+
+### Handout files for students
 
 ***********
 Main Files:
